@@ -270,6 +270,76 @@ fn style_cmd(argv: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `fit <目录…> [--out model.lk]`：S6.2 训练「像素 → 六维因子」的线性回归。
+/// 每 5 张留 1 张做留出（按文件名排序，确定性）。
+fn fit_cmd(argv: &[String]) -> ExitCode {
+    use trit_look::regress::{factors, features, pearson, LinModel, NF};
+    let files = expand(&positional(argv, None));
+    if files.len() < 6 {
+        fail("用法: trit-look fit <目录…> [--out model.lk]（至少 6 张）");
+    }
+    let mut train = Vec::new();
+    let mut hold = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        let (w, h, rgb) = read_png(f).unwrap_or_else(|e| fail(&e));
+        let t = factors(&trit_look::analyze(&rgb, w, h));
+        let fe = features(&rgb, w, h);
+        if i % 5 == 0 {
+            hold.push((fe, t));
+        } else {
+            train.push((fe, t));
+        }
+    }
+    let m = LinModel::fit(&train);
+    let names = ["笔触", "级数", "硬边", "对比", "色温", "饱和"];
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "训练 {} 张 / 留出 {} 张", train.len(), hold.len());
+    let mut rs = Vec::new();
+    for k in 0..NF {
+        let truth: Vec<f32> = hold.iter().map(|(_, t)| t[k]).collect();
+        let pred: Vec<f32> = hold.iter().map(|(f, _)| m.predict_feat(f)[k]).collect();
+        let r = pearson(&truth, &pred);
+        rs.push(r);
+        let _ = writeln!(out, "  留出 {}：r={:.3}", names[k], r);
+    }
+    rs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let _ = writeln!(out, "留出相关中位数 {:.3}", rs[rs.len() / 2]);
+    let path = arg(argv, "--out").unwrap_or("model.lk");
+    m.save(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    let _ = writeln!(out, "模型已存 {path}");
+    ExitCode::SUCCESS
+}
+
+/// `predict <图…> --model model.lk`：打印「实测因子 vs 回归预测」。
+fn predict_cmd(argv: &[String]) -> ExitCode {
+    use trit_look::regress::{factors, LinModel, NF};
+    let path = arg(argv, "--model").unwrap_or_else(|| fail("缺 --model"));
+    let m = LinModel::load(Path::new(path)).unwrap_or_else(|e| fail(&e));
+    let files = expand(&positional(argv, None));
+    if files.is_empty() {
+        fail("用法: trit-look predict <图或目录>… --model model.lk");
+    }
+    let names = ["笔触", "级数", "硬边", "对比", "色温", "饱和"];
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{:<24} {}", "样本", names.join("         "));
+    for f in &files {
+        let (w, h, rgb) = read_png(f).unwrap_or_else(|e| fail(&e));
+        let truth = factors(&trit_look::analyze(&rgb, w, h));
+        let pred = m.predict(&rgb, w, h);
+        let name = f
+            .file_stem()
+            .map(|x| x.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut line = format!("{name:<24}");
+        for k in 0..NF {
+            line.push_str(&format!(" {:>6.2}/{:<6.2}", truth[k], pred[k]));
+        }
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = writeln!(out, "（每列：实测/预测）");
+    ExitCode::SUCCESS
+}
+
 /// 门自检：把「风格度量必须成立的不变量」逐条跑一遍，任一条失败就 exit 1。
 fn selfcheck() -> ExitCode {
     let mut fails = 0usize;
@@ -419,6 +489,67 @@ fn selfcheck() -> ExitCode {
         ),
     );
 
+    // 8) 回归通路（S6.2）：合成样本 → 拟合 → 留出相关
+    {
+        use trit_look::regress::{factors as fac, features as feats, pearson, LinModel, NF};
+        let mut train = Vec::new();
+        let mut hold = Vec::new();
+        for i in 0..40usize {
+            let block = [1usize, 2, 4, 8, 16][i % 5];
+            // 级数也要变化，否则「级数」因子的留出真值是常数（r 恒为 0，测不出东西）
+            let k_levels = [2usize, 3, 5, 8, 12][(i / 5) % 5];
+            let contrast = 0.05 + 0.02 * (i as f32);
+            let sat = ((i * 37) % 100) as f32 / 100.0;
+            let mut v = vec![0.0f32; w * h * 3];
+            for y in 0..h {
+                for x in 0..w {
+                    let cell = ((x / block) + (y / block)) % k_levels;
+                    let lvl = cell as f32 / (k_levels - 1).max(1) as f32;
+                    let base = 0.5 + contrast * (lvl * 2.0 - 1.0);
+                    let p = (y * w + x) * 3;
+                    // 把灰阶按 sat 往蓝色偏，制造饱和差异
+                    v[p] = base * (1.0 - 0.5 * sat);
+                    v[p + 1] = base * (1.0 - 0.2 * sat);
+                    v[p + 2] = (base * (1.0 + 0.5 * sat)).min(1.0);
+                }
+            }
+            let t = fac(&trit_look::analyze(&v, w, h));
+            let f = feats(&v, w, h);
+            // 留出必须覆盖所有 block 档位：i%5==0 会让留出全是同一个 block，因子变成常数
+            if i % 7 == 3 {
+                hold.push((f, t));
+            } else {
+                train.push((f, t));
+            }
+        }
+        let m = LinModel::fit(&train);
+        let names = ["笔触", "级数", "硬边", "对比", "色温", "饱和"];
+        let mut rs = Vec::new();
+        for k in 0..NF {
+            let truth: Vec<f32> = hold.iter().map(|(_, t)| t[k]).collect();
+            let pred: Vec<f32> = hold.iter().map(|(f, _)| m.predict_feat(f)[k]).collect();
+            rs.push(pearson(&truth, &pred));
+        }
+        let mut sorted = rs.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = sorted[sorted.len() / 2];
+        let good = rs.iter().filter(|r| **r >= 0.6).count();
+        check(
+            "回归通路（留出 r）",
+            med >= 0.8 && good >= 5,
+            format!(
+                "{} 中位数 {:.2}",
+                names
+                    .iter()
+                    .zip(&rs)
+                    .map(|(n, r)| format!("{n}{:.2}", (r * 100.0).round() / 100.0))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                med
+            ),
+        );
+    }
+
     // 6) PNG 往返一致
     let tmp = std::env::temp_dir().join("trit_look_selfcheck.png");
     // 8bit PNG 会有量化，所以拿「量化后的同一数据」做对照，而不是原始浮点
@@ -438,7 +569,7 @@ fn selfcheck() -> ExitCode {
     check("PNG 往返一致", ok_io, "写盘→读回→analyze 相同".into());
 
     if fails == 0 {
-        println!("SELFCHECK_OK 7/7");
+        println!("SELFCHECK_OK 8/8");
         ExitCode::SUCCESS
     } else {
         println!("SELFCHECK_FAIL {fails} 项");
@@ -452,9 +583,13 @@ fn main() -> ExitCode {
         Some("look") => look_cmd(&argv),
         Some("style") => style_cmd(&argv),
         Some("selfcheck") => selfcheck(),
+        Some("fit") => fit_cmd(&argv),
+        Some("predict") => predict_cmd(&argv),
         _ => {
             eprintln!(
-                "trit-look {}\n用法:\n  trit-look look <图或目录>… [--out features.csv]\n  trit-look style <A…> [--vs <B…>] [--out style.csv]\n  trit-look selfcheck",
+                "trit-look {}\n用法:\n  trit-look look <图或目录>… [--out features.csv]\n  trit-look style <A…> [--vs <B…>] [--out style.csv]\n  trit-look fit <目录…> [--out model.lk]
+  trit-look predict <图…> --model model.lk
+  trit-look selfcheck",
                 env!("CARGO_PKG_VERSION")
             );
             ExitCode::from(2)
