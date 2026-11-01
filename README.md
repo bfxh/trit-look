@@ -1,5 +1,7 @@
 # trit-look
 
+[![crates.io](https://img.shields.io/crates/v/trit-look.svg)](https://crates.io/crates/trit-look)
+
 把「观感」变成可复跑的数字：**亮度/对比/饱和/色相熵/细纹/硬边/平坦/级数/雾感/发光/笔触尺度/多尺度能量/边界比/方向性**，
 外加一组 **六维风格因子**（笔触 · 级数 · 硬边 · 对比 · 色温 · 饱和）与两组之间的 **Cohen's d**。
 附带一道 **门自检**（`selfcheck`），把「这些度量必须成立的不变量」逐条验；CI 里跑不过就红。
