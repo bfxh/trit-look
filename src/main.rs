@@ -114,21 +114,9 @@ fn look_cmd(argv: &[String]) -> ExitCode {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,
-        "{:<24} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6}",
-        "样本",
-        "亮度",
-        "对比",
-        "饱和",
-        "色相熵",
-        "细纹",
-        "硬边",
-        "平坦",
-        "级数",
-        "雾感",
-        "发光",
-        "笔触",
-        "hf1",
-        "边界"
+        "{:<24} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>7} {:>6}",
+        "样本", "亮度", "对比", "饱和", "色相熵", "细纹", "硬边", "平坦", "级数",
+        "雾感", "发光", "笔触", "hf1", "边界", "各向异性", "主方向"
     );
     let mut rows: Vec<(String, Look)> = Vec::new();
     for f in &files {
@@ -140,23 +128,48 @@ fn look_cmd(argv: &[String]) -> ExitCode {
         let l = trit_look::analyze(&rgb, w, h);
         let _ = writeln!(
             out,
-            "{name:<24} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.3} {:>5.3} {:>5.2} {:>5.0} {:>5.2} {:>5.3} {:>5.2} {:>6.3} {:>6.3}",
+            "{name:<24} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.3} {:>5.3} {:>5.2} {:>5.0} {:>5.2} {:>5.3} {:>5.2} {:>6.3} {:>6.3} {:>7.3} {:>6.1}",
             l.luma, l.contrast, l.sat, l.hue_entropy, l.fine, l.strong, l.flat, l.levels, l.haze,
-            l.emissive, l.stroke, l.hf1, l.border
+            l.emissive, l.stroke, l.hf1, l.border, l.coherence, l.angle
         );
         rows.push((name, l));
     }
     if let Some(p) = arg(argv, "--out") {
         let mut csv = String::from(
-            "name,luma,contrast,sat,hue_entropy,edge,fine,strong,flat,levels,haze,emissive,bars,warmth,key_dir,key_fill_dwarm,highlights,hf1,hf2,hf4,border,stroke\n",
+            "name,luma,contrast,sat,hue_entropy,edge,fine,strong,flat,levels,haze,emissive,bars,warmth,key_dir,key_fill_dwarm,highlights,hf1,hf2,hf4,border,stroke,coherence,angle
+",
         );
         for (n, l) in &rows {
-            csv.push_str(&format!(
-                "{n},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.1},{:.4},{:.4},{:.4},{:.4},{:.1},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2}\n",
-                l.luma, l.contrast, l.sat, l.hue_entropy, l.edge, l.fine, l.strong, l.flat, l.levels,
-                l.haze, l.emissive, l.bars, l.warmth, l.key_dir, l.key_fill_dwarm, l.highlights,
-                l.hf1, l.hf2, l.hf4, l.border, l.stroke
-            ));
+            let vals = [
+                l.luma as f64,
+                l.contrast as f64,
+                l.sat as f64,
+                l.hue_entropy as f64,
+                l.edge as f64,
+                l.fine as f64,
+                l.strong as f64,
+                l.flat as f64,
+                l.levels as f64,
+                l.haze as f64,
+                l.emissive as f64,
+                l.bars as f64,
+                l.warmth as f64,
+                l.key_dir as f64,
+                l.key_fill_dwarm as f64,
+                l.highlights as f64,
+                l.hf1 as f64,
+                l.hf2 as f64,
+                l.hf4 as f64,
+                l.border as f64,
+                l.stroke as f64,
+                l.coherence as f64,
+                l.angle as f64,
+            ];
+            csv.push_str(n);
+            for v in vals {
+                csv.push_str(&format!(",{v:.4}"));
+            }
+            csv.push('\n');
         }
         std::fs::write(p, csv).unwrap_or_else(|e| fail(&format!("{p}: {e}")));
         let _ = writeln!(out, "特征已写 {p}");
@@ -384,6 +397,28 @@ fn selfcheck() -> ExitCode {
         format!("d={d:.2}（A {ma:.3} / B {mb:.3}）"),
     );
 
+    // 7) 方向性：横条纹强各向异性且主方向≈90°，噪声各向同性
+    let mut stripes = vec![0.0f32; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let c = if (y / 4) % 2 == 0 { 0.2 } else { 0.8 };
+            let p = (y * w + x) * 3;
+            stripes[p..p + 3].fill(c);
+            let _ = x;
+        }
+    }
+    let ls = trit_look::analyze(&stripes, w, h);
+    let ln = trit_look::analyze(&rnd, w, h);
+    let da = (ls.angle - 90.0).abs().min(180.0 - (ls.angle - 90.0).abs());
+    check(
+        "方向性可分",
+        ls.coherence > 0.8 && da < 10.0 && ln.coherence < 0.3,
+        format!(
+            "条纹 coh={:.2} angle={:.0}°；噪声 coh={:.2}",
+            ls.coherence, ls.angle, ln.coherence
+        ),
+    );
+
     // 6) PNG 往返一致
     let tmp = std::env::temp_dir().join("trit_look_selfcheck.png");
     // 8bit PNG 会有量化，所以拿「量化后的同一数据」做对照，而不是原始浮点
@@ -403,7 +438,7 @@ fn selfcheck() -> ExitCode {
     check("PNG 往返一致", ok_io, "写盘→读回→analyze 相同".into());
 
     if fails == 0 {
-        println!("SELFCHECK_OK 6/6");
+        println!("SELFCHECK_OK 7/7");
         ExitCode::SUCCESS
     } else {
         println!("SELFCHECK_FAIL {fails} 项");

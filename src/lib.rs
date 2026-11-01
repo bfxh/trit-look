@@ -55,6 +55,10 @@ pub struct Look {
     /// 笔触尺度：带符号自相关降到 1/e 的位移（对数插值，范围 1..32）。
     /// 只作**跨图比较**的相对量（周期图案约落在 0.3×周期）：细颗粒 ≈1–2，大色块/场景 ≥4。
     pub stroke: f32,
+    /// 方向性（结构张量各向异性）：0 = 各向同性（噪声/砂纸），1 = 强方向（木纹/布纹/条纹）。
+    pub coherence: f32,
+    /// 主梯度方向（度，0..180）。横条纹的梯度是竖直的 ⇒ ≈90°。
+    pub angle: f32,
 }
 
 fn luma_of(r: f32, g: f32, b: f32) -> f32 {
@@ -490,6 +494,42 @@ fn analyze_region(
         prev = (lag, c);
     }
 
+    // 结构张量：方向性（各向异性）与主梯度方向
+    let (mut jxx, mut jyy, mut jxy) = (0.0f32, 0.0f32, 0.0f32);
+    let mut jn = 0usize;
+    if cw > 2 && ch > 2 {
+        for y in 1..ch - 1 {
+            for x in 1..cw - 1 {
+                let g = |dx: isize, dy: isize| {
+                    lum[at((x as isize + dx) as usize, (y as isize + dy) as usize)]
+                };
+                let gx =
+                    -g(-1, -1) - 2.0 * g(-1, 0) - g(-1, 1) + g(1, -1) + 2.0 * g(1, 0) + g(1, 1);
+                let gy =
+                    -g(-1, -1) - 2.0 * g(0, -1) - g(1, -1) + g(-1, 1) + 2.0 * g(0, 1) + g(1, 1);
+                let m = (gx * gx + gy * gy).sqrt();
+                if m > 0.05 {
+                    jxx += gx * gx;
+                    jyy += gy * gy;
+                    jxy += gx * gy;
+                    jn += 1;
+                }
+            }
+        }
+    }
+    let (coherence, angle) = if jn > 0 && (jxx + jyy) > 1e-9 {
+        let tr = jxx + jyy;
+        let det = jxx * jyy - jxy * jxy;
+        let disc = (tr * tr - 4.0 * det).max(0.0).sqrt();
+        let l1 = 0.5 * (tr + disc);
+        let l2 = 0.5 * (tr - disc);
+        let c = ((l1 - l2) / tr).clamp(0.0, 1.0);
+        let a = 0.5 * (2.0 * jxy).atan2(jxx - jyy);
+        (c, a.to_degrees().rem_euclid(180.0))
+    } else {
+        (0.0, 0.0)
+    };
+
     Look {
         w,
         h,
@@ -514,6 +554,8 @@ fn analyze_region(
         hf4,
         border,
         stroke,
+        coherence,
+        angle,
     }
 }
 
@@ -594,6 +636,43 @@ mod tests {
         let l = analyze(&v, w, h);
         let d = l.key_dir.min(180.0 - l.key_dir);
         assert!(d < 10.0, "梯度应基本沿水平，实际 {}°", l.key_dir);
+    }
+
+    #[test]
+    fn orientation_separates_stripes_from_noise() {
+        let (w, h) = (64usize, 64usize);
+        let mut stripes = vec![0.0f32; w * h * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let c = if (y / 4) % 2 == 0 { 0.2 } else { 0.8 };
+                let p = (y * w + x) * 3;
+                stripes[p..p + 3].fill(c);
+                let _ = x;
+            }
+        }
+        let a = analyze(&stripes, w, h);
+        assert!(
+            a.coherence > 0.8,
+            "横条纹应强各向异性，实际 {}",
+            a.coherence
+        );
+        let d = (a.angle - 90.0).abs().min(180.0 - (a.angle - 90.0).abs());
+        assert!(d < 10.0, "横条纹梯度应竖直（≈90°），实际 {:.1}", a.angle);
+
+        let mut noise = vec![0.0f32; w * h * 3];
+        let mut s = 0xABCD_EF01u64;
+        for v in noise.iter_mut() {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            *v = (s >> 11) as f32 / (1u64 << 53) as f32;
+        }
+        let b = analyze(&noise, w, h);
+        assert!(
+            b.coherence < 0.3,
+            "各向同性噪声应低各向异性，实际 {}",
+            b.coherence
+        );
     }
 
     #[test]
