@@ -83,4 +83,4 @@ CI（`.github/workflows/ci.yml`）在 push/PR 上跑：`fmt --check` → `clippy
 
 ## 许可
 
-代码 MIT（署名与来源条款见 [NOTICE.md](NOTICE.md)）。**不附带任何图像素材**；测试/自检用的图都是运行时合成的。
+代码 MIT OR Apache-2.0（署名与来源条款见 [NOTICE.md](NOTICE.md)）。**不附带任何图像素材**；测试/自检用的图都是运行时合成的。

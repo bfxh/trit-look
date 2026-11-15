@@ -3,7 +3,7 @@ name = "trit-look"
 version = "0.1.0"
 edition = "2021"
 description = "风格/画质/光影的观感测量与门自检（六维因子 + Cohen's d）"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/bfxh/trit-look"
 rust-version = "1.80"
 
